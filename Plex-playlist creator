@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+
+from plexapi.server import PlexServer
+from plexapi.exceptions import PlexApiException
+import sys
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('plex_playlist_debug.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+def connect_to_plex():
+    """Connect to Plex server"""
+    logging.info("Starting Plex server connection...")
+    try:
+        # You'll need to update these with your Plex server details
+        PLEX_URL = input("Enter your Plex server URL (e.g., http://localhost:32400): ").strip()
+        PLEX_TOKEN = input("Enter your Plex token: ").strip()
+        
+        logging.debug(f"Attempting to connect to Plex server at: {PLEX_URL}")
+        logging.debug(f"Using token: {PLEX_TOKEN[:10]}..." if PLEX_TOKEN else "No token provided")
+        
+        plex = PlexServer(PLEX_URL, PLEX_TOKEN)
+        logging.info(f"Successfully connected to Plex server: {plex.friendlyName}")
+        print(f"Connected to Plex server: {plex.friendlyName}")
+        return plex
+    except PlexApiException as e:
+        logging.error(f"Failed to connect to Plex server: {e}")
+        print(f"Error connecting to Plex: {e}")
+        sys.exit(1)
+
+def search_media(plex, media_type, keywords):
+    """Search for media containing keywords in title or summary"""
+    logging.info(f"Starting media search for type: {media_type}, keywords: {keywords}")
+    results = []
+    found_titles = set()  # Track found titles to avoid duplicates
+    
+    # Get appropriate library section
+    if media_type.lower() == 'movies':
+        sections = [s for s in plex.library.sections() if s.type == 'movie']
+        logging.debug(f"Looking for movie libraries...")
+    elif media_type.lower() == 'tv':
+        sections = [s for s in plex.library.sections() if s.type == 'show']
+        logging.debug(f"Looking for TV show libraries...")
+    else:
+        logging.error(f"Invalid media type provided: {media_type}")
+        print("Invalid media type. Use 'movies' or 'tv'")
+        return results
+    
+    logging.debug(f"Found {len(sections)} matching library sections")
+    
+    if not sections:
+        logging.warning(f"No {media_type} libraries found on Plex server")
+        print(f"No {media_type} libraries found")
+        return results
+    
+    print(f"Searching in {len(sections)} {media_type} library/libraries...")
+    
+    for section in sections:
+        logging.info(f"Searching in library: {section.title}")
+        print(f"Searching in library: {section.title}")
+        
+        try:
+            all_media = section.all()
+            logging.debug(f"Retrieved {len(all_media)} items from library: {section.title}")
+            print(f"Total items in library: {len(all_media)}")
+        except Exception as e:
+            logging.error(f"Failed to retrieve items from library {section.title}: {e}")
+            continue
+        
+        matches_in_section = 0
+        for item in all_media:
+            if media_type.lower() == 'movies':
+                # For movies, check title and summary
+                title = item.title.lower()
+                summary = getattr(item, 'summary', '').lower() if hasattr(item, 'summary') else ''
+                
+                # Check if any keyword matches movie title or summary
+                for keyword in keywords:
+                    if (keyword.lower() in title or keyword.lower() in summary) and item.title not in found_titles:
+                        results.append(item)
+                        found_titles.add(item.title)
+                        matches_in_section += 1
+                        logging.debug(f"Match found: '{item.title}' (keyword: {keyword})")
+                        print(f"Found: {item.title}")
+                        break
+            
+            elif media_type.lower() == 'tv':
+                # For TV shows, first check series-level metadata
+                title = item.title.lower()
+                summary = getattr(item, 'summary', '').lower() if hasattr(item, 'summary') else ''
+                
+                series_match = False
+                # Check if any keyword matches series title or summary
+                for keyword in keywords:
+                    if (keyword.lower() in title or keyword.lower() in summary):
+                        if item.title not in found_titles:
+                            results.append(item)
+                            found_titles.add(item.title)
+                            matches_in_section += 1
+                            logging.debug(f"Series match found: '{item.title}' (keyword: {keyword})")
+                            print(f"Found series: {item.title}")
+                            series_match = True
+                        break
+                
+                # Also search individual episodes
+                logging.debug(f"Searching episodes for series: {item.title}")
+                try:
+                    for episode in item.episodes():
+                        episode_title = episode.title.lower()
+                        episode_summary = getattr(episode, 'summary', '').lower() if hasattr(episode, 'summary') else ''
+                        
+                        # Create unique identifier for episode
+                        episode_id = f"{item.title} - S{episode.seasonNumber:02d}E{episode.episodeNumber:02d} - {episode.title}"
+                        
+                        for keyword in keywords:
+                            if (keyword.lower() in episode_title or keyword.lower() in episode_summary) and episode_id not in found_titles:
+                                results.append(episode)
+                                found_titles.add(episode_id)
+                                matches_in_section += 1
+                                logging.debug(f"Episode match found: '{episode.title}' from series '{item.title}' (keyword: {keyword})")
+                                print(f"Found episode: {item.title} - {episode.title}")
+                                break
+                except Exception as e:
+                    logging.warning(f"Could not search episodes for series '{item.title}': {e}")
+        
+        logging.info(f"Found {matches_in_section} matches in library: {section.title}")
+    
+    logging.info(f"Search completed. Total matches found: {len(results)}")
+    return results
+
+def create_playlist(plex, playlist_name, media_items):
+    """Create a playlist with the found media items"""
+    logging.info(f"Starting playlist creation: '{playlist_name}' with {len(media_items)} items")
+    
+    if not media_items:
+        logging.warning("No media items provided for playlist creation")
+        print("No media items to add to playlist")
+        return
+    
+    try:
+        # Check if playlist already exists
+        logging.debug(f"Checking for existing playlists...")
+        existing_playlists = plex.playlists()
+        logging.debug(f"Found {len(existing_playlists)} existing playlists")
+        
+        for playlist in existing_playlists:
+            if playlist.title == playlist_name:
+                logging.info(f"Playlist '{playlist_name}' already exists")
+                overwrite = input(f"Playlist '{playlist_name}' already exists. Overwrite? (y/n): ")
+                if overwrite.lower() == 'y':
+                    logging.info(f"Deleting existing playlist: {playlist_name}")
+                    playlist.delete()
+                    break
+                else:
+                    logging.info("User cancelled playlist creation")
+                    print("Playlist creation cancelled")
+                    return
+        
+        # Create new playlist
+        logging.debug(f"Creating new playlist with {len(media_items)} items")
+        playlist = plex.createPlaylist(playlist_name, items=media_items)
+        logging.info(f"Successfully created playlist: {playlist_name}")
+        print(f"Playlist '{playlist_name}' created successfully with {len(media_items)} items")
+        
+    except PlexApiException as e:
+        logging.error(f"Failed to create playlist: {e}")
+        print(f"Error creating playlist: {e}")
+
+def parse_keywords(keywords_input):
+    """Parse keywords input, handling quoted phrases"""
+    keywords = []
+    current_phrase = ""
+    in_quotes = False
+    
+    i = 0
+    while i < len(keywords_input):
+        char = keywords_input[i]
+        
+        if char == '"' and not in_quotes:
+            # Start of quoted phrase
+            in_quotes = True
+        elif char == '"' and in_quotes:
+            # End of quoted phrase
+            if current_phrase.strip():
+                keywords.append(current_phrase.strip())
+            current_phrase = ""
+            in_quotes = False
+        elif char == ',' and not in_quotes:
+            # Comma outside quotes - end current keyword
+            if current_phrase.strip():
+                keywords.append(current_phrase.strip())
+            current_phrase = ""
+        else:
+            # Regular character
+            current_phrase += char
+        
+        i += 1
+    
+    # Add final keyword/phrase if exists
+    if current_phrase.strip():
+        keywords.append(current_phrase.strip())
+    
+    return keywords
+
+def main():
+    logging.info("=" * 50)
+    logging.info("Starting Plex Playlist Creator application")
+    logging.info("=" * 50)
+    
+    print("Plex Playlist Creator")
+    print("=" * 30)
+    print("Examples of keyword formats:")
+    print("  Single words: action, comedy, thriller")
+    print("  Phrases: \"New Years\", \"Star Wars\", \"Game of Thrones\"")
+    print("  Mixed: action, \"New Years\", comedy, \"Star Trek\"")
+    print()
+    
+    # Connect to Plex
+    plex = connect_to_plex()
+    
+    # Get user input
+    media_type = input("Create playlist for 'movies' or 'tv' shows? ").strip()
+    logging.info(f"User selected media type: {media_type}")
+    
+    keywords_input = input("Enter keywords to search for (comma-separated, use quotes for phrases like \"New Years\"): ").strip()
+    
+    keywords = parse_keywords(keywords_input)
+    
+    logging.info(f"User provided keywords: {keywords}")
+    print(f"Parsed keywords: {keywords}")  # Show user what was parsed
+    
+    if not keywords:
+        logging.error("No keywords provided by user")
+        print("No keywords provided")
+        sys.exit(1)
+    
+    playlist_name = input("Enter playlist name: ").strip()
+    if not playlist_name:
+        playlist_name = f"Keyword Search: {', '.join(keywords)}"
+        logging.info(f"Generated default playlist name: {playlist_name}")
+    else:
+        logging.info(f"User provided playlist name: {playlist_name}")
+    
+    # Search for media
+    print(f"\nSearching for {media_type} with keywords: {', '.join(keywords)}")
+    media_items = search_media(plex, media_type, keywords)
+    
+    if media_items:
+        logging.info(f"Search successful - found {len(media_items)} matching items")
+        print(f"\nFound {len(media_items)} matching items")
+        
+        # Log the found items for debugging
+        logging.debug("Found items:")
+        for item in media_items:
+            logging.debug(f"  - {item.title}")
+        
+        create_confirmation = input("Create playlist with these items? (y/n): ")
+        logging.info(f"User confirmation for playlist creation: {create_confirmation}")
+        
+        if create_confirmation.lower() == 'y':
+            create_playlist(plex, playlist_name, media_items)
+        else:
+            logging.info("User cancelled playlist creation")
+            print("Playlist creation cancelled")
+    else:
+        logging.warning("No matching media found")
+        print("No matching media found")
+    
+    logging.info("Application completed")
+
+if __name__ == "__main__":
+    main()
