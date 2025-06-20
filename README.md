@@ -1,6 +1,6 @@
 # PLEX PLAYLIST CREATOR
 
-A Python script that automatically creates Plex playlists based on keyword searches across your media library. Search through movie titles, descriptions, TV series, and individual episodes to build custom playlists.bThis was mainly made for creating a Halloween playlist consisting of shows that have Halloween in the discription and a Christmas list show shows that contain Christmas, Thanksgiving,"New Years"
+A Python script that automatically creates Plex playlists based on keyword searches across your media library. Search through movie titles, descriptions, TV series, and individual episodes to build custom playlists. This was mainly made for creating a Halloween playlist consisting of shows that have Halloween in the discription and a Christmas list show shows that contain Christmas, Thanksgiving,"New Years"
 
 ## Features
 
