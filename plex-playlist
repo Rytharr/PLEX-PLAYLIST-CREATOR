@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Launcher: runs the script with this repo's virtualenv, from anywhere
+dir="$(dirname "$(readlink -f "$0")")"
+exec "$dir/.venv/bin/python" "$dir/Plex-playlist creator" "$@"

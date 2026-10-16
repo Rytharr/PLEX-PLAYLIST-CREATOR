@@ -1,179 +1,132 @@
 # PLEX PLAYLIST CREATOR
 
-A Python script that automatically creates Plex playlists based on keyword searches across your media library. Search through movie titles, descriptions, TV series, and individual episodes to build custom playlists. This was mainly made for creating a Halloween playlist consisting of shows that have Halloween in the discription and a Christmas list show shows that contain Christmas, Thanksgiving,"New Years"
+A Python script that creates and updates Plex playlists from keyword searches across your media library. It searches movie titles and descriptions, TV series, and individual episodes. It was made for holiday playlists (a Halloween playlist of everything that mentions Halloween, a Christmas one for Christmas, Thanksgiving and New Years), but works for any theme.
 
 ## Features
 
-### 🎬 **Multi-Media Support**
-- **Movies**: Search movie titles and descriptions
-- **TV Shows**: Search series titles, descriptions, AND individual episodes
-- **Mixed Playlists**: Combine series and individual episodes in the same playlist
+- **Presets**: save a search once (keywords, media type, playlist name) and re-run it every year with one command
+- **Updates in place**: re-running a search adds new matches and removes ones that no longer match, keeping the playlist's poster and order
+- **Movies, TV, or both** in the same playlist
+- **TV search at two levels**: a show whose title/description matches goes in whole; otherwise only the matching episodes go in
+- **Whole-word matching**: `elf` finds *Elf* but not *herself*; plurals and apostrophes are handled (`new years` finds *New Year's Eve*); put `*` at either end to match part of a word (`*christmas*` finds *Christmastime* and *Ludachristmas*)
+- **Exclude keywords**: e.g. find `halloween` but skip anything mentioning `"doctor who"`
+- **Preview / dry run** before anything changes
+- Server URL and token are asked for once and remembered
 
-### 🔍 **Advanced Search Capabilities**
-- **Individual Keywords**: Search for single words like `action`, `comedy`, `thriller`
-- **Multi-word Phrases**: Use quotes for exact phrases like `"New Years"`, `"Star Wars"`
-- **Mixed Search**: Combine both approaches: `action, "New Years", comedy, "Star Trek"`
-- **Episode-Level Search**: Find TV episodes by episode titles and descriptions
+## Setup
 
-### 📊 **Comprehensive Logging**
-- **Debug Logging**: Detailed logs saved to `plex_playlist_debug.log`
-- **Real-time Feedback**: See search progress and results as they happen
-- **Error Handling**: Graceful handling of connection and search errors
+Requires Python 3.8+ and a Plex Media Server.
 
-### 🎯 **Smart Playlist Management**
-- **Duplicate Prevention**: Automatically prevents duplicate entries
-- **Overwrite Protection**: Prompts before overwriting existing playlists
-- **Auto-naming**: Generates playlist names based on keywords if not specified
+```bash
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
 
-## Installation
+Optionally put the launcher on your PATH so you can run `plex-playlist` from anywhere:
 
-### Prerequisites
-- Python 3.7 or higher
-- Plex Media Server with accessible libraries
-- Plex authentication token
+```bash
+ln -s "$PWD/plex-playlist" ~/.local/bin/plex-playlist
+```
 
-### Setup
-1. Clone or download this repository
-2. Install required dependencies:
-   ```bash
-   pip install PlexAPI
-   ```
+The first run asks for your Plex server URL and token and saves them to `~/.config/plex-playlist-creator/config.json` (readable only by you). Run with `--setup` to change them. `PLEX_URL` / `PLEX_TOKEN` environment variables override the saved values.
+
+### Getting your Plex token
+
+In Plex Web, open any movie or episode → **⋯** → **Get Info** → **View XML**. The URL of the page that opens ends in `X-Plex-Token=...`; that value is your token. See also [Plex's guide](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/).
 
 ## Usage
 
-### Basic Usage
-1. Run the script:
-   ```bash
-   python "Plex-playlist creator"
-   ```
+### Interactive menu
 
-2. Follow the interactive prompts:
-   - Enter your Plex server URL (e.g., `http://localhost:32400`)
-   - Enter your Plex authentication token
-   - Choose media type (`movies` or `tv`)
-   - Enter search keywords
-   - Specify playlist name
-   - Confirm playlist creation
-
-### Keyword Examples
-
-#### Single Words
+```bash
+plex-playlist
 ```
-action, comedy, thriller
+
 ```
-Finds content containing any of these individual words.
-
-#### Exact Phrases
+Plex Playlist Creator
+  1) Halloween Episodes   tv     *halloween*
+  2) Halloween Movies     movies *halloween*
+  3) Christmas Episodes   tv     *christmas*, *thanksgiving*, "new years", "happy new year"
+  4) Christmas Movies     movies *christmas*, *thanksgiving*, "new years", "happy new year"
+  a) Update all presets
+  c) Custom search
+  q) Quit
 ```
-"New Years", "Star Wars", "Game of Thrones"
+
+A custom search asks for keywords, exclusions, media type and playlist name, shows what it found, and offers to save it as a preset.
+
+### Yearly holiday refresh
+
+```bash
+plex-playlist --all-presets            # preview each change and confirm
+plex-playlist --all-presets --dry-run  # just show what would change
+plex-playlist --preset halloween -y    # one preset, no questions
 ```
-Finds content containing these exact phrases.
 
-#### Mixed Format
+### One-off searches
+
+```bash
+plex-playlist -k 'zombie, "living dead"' -t movies -n "Zombie Night"
+plex-playlist -k halloween -x '"doctor who"' -n Halloween
 ```
-action, "New Years", comedy, "Star Trek"
+
+### All options
+
+| Option | Meaning |
+| --- | --- |
+| `-p NAME`, `--preset NAME` | Run a saved preset (repeatable) |
+| `--all-presets` | Run every saved preset |
+| `--list-presets` | Show saved presets |
+| `-k`, `--keywords` | One-off search keywords |
+| `-x`, `--exclude` | Keywords that disqualify a match |
+| `-t`, `--type` | `movies`, `tv` or `both` (default `both`) |
+| `-n`, `--name` | Playlist name for `--keywords` (default: first keyword) |
+| `-y`, `--yes` | Don't ask for confirmation |
+| `--add-only` | When updating, don't remove items that no longer match (keeps things you added by hand) |
+| `--dry-run` | Show what would change, change nothing |
+| `--setup` | Re-enter server URL and token |
+
+## Keywords
+
+Comma-separated; use quotes for phrases: `action, "New Years", comedy`
+
+- Matching is case-insensitive and whole-word, with an optional plural `s`
+- Apostrophes are ignored, so `new years` matches *New Year's*
+- A `*` at either end matches part of a word: `vampir*` finds *vampires*, `*christmas*` finds *Ludachristmas*
+- Excluded keywords are checked against the item's title and description (and, for episodes, the show's title)
+
+## Presets
+
+Presets live in `presets.json` next to the script. Edit it directly or save one from the custom-search menu. The included presets:
+
+| Preset | Playlist | Searches | Keywords |
+| --- | --- | --- | --- |
+| `halloween` | Halloween Episodes | TV | `*halloween*` |
+| `halloween-movies` | Halloween Movies | Movies | `*halloween*` |
+| `christmas` | Christmas Episodes | TV | `*christmas*`, `*thanksgiving*`, `new years`, `happy new year` (excludes Guilty Crown) |
+| `christmas-movies` | Christmas Movies | Movies | `*christmas*`, `*thanksgiving*`, `new years`, `happy new year` |
+
+Each entry looks like this:
+
+```json
+{
+  "christmas": {
+    "name": "Christmas Episodes",
+    "type": "tv",
+    "keywords": ["*christmas*", "*thanksgiving*", "new years", "happy new year"],
+    "exclude": ["guilty crown"]
+  }
+}
 ```
-Combines individual words and exact phrases in one search.
 
-### TV Show Search Behavior
-
-When searching TV shows, the script will:
-
-1. **Series-Level Matches**: If keywords match the series title or description, the entire series is added to the playlist
-2. **Episode-Level Matches**: If keywords match individual episode titles or descriptions, only those specific episodes are added
-3. **Combined Results**: You can have both full series and individual episodes in the same playlist
-
-#### Example:
-- Search for `"New Years"` in TV shows
-- If "Friends" series description mentions "New Years" → entire "Friends" series added
-- If only "The One with the Blackout" episode mentions "New Years" → only that episode added
-
-## Getting Your Plex Token
-
-To use this script, you'll need a Plex authentication token:
-
-1. **Web Method**: 
-   - Log into Plex Web App
-   - Open browser developer tools (F12)
-   - Go to Network tab, refresh page
-   - Look for requests containing `X-Plex-Token` in headers
-
-2. **Settings Method**:
-   - Go to Plex Web App → Settings → Account
-   - Look for "Authorized Devices" or similar section
-   - Token may be visible in URL or device listings
-
-3. **Third-party Tools**: Use tools like Plex Token Generator websites (use at your own discretion)
-
-## Configuration
-
-The script uses interactive prompts, but you can modify the source code for automation:
-
-- **Server URL**: Modify the `PLEX_URL` input prompt
-- **Token**: Modify the `PLEX_TOKEN` input prompt
-- **Log Level**: Change `logging.DEBUG` to `logging.INFO` for less verbose logging
-
-## Output Files
-
-- **`plex_playlist_debug.log`**: Detailed debug log with timestamps
-- **Console Output**: Real-time progress and results
+`name` is the Plex playlist name. Running a preset whose playlist already exists updates that playlist. Change `name` to match your own playlists so they get updated rather than duplicated.
 
 ## Troubleshooting
 
-### Common Issues
-
-1. **Import Error**: Make sure PlexAPI is installed (`pip install PlexAPI`)
-2. **Connection Failed**: Verify server URL and token are correct
-3. **No Libraries Found**: Check that your Plex server has movie/TV libraries
-4. **Permission Denied**: Ensure your Plex token has sufficient permissions
-
-### Debug Information
-
-The script provides extensive logging. Check `plex_playlist_debug.log` for:
-- Connection attempts and results
-- Library search progress
-- Match details (which keywords matched which content)
-- Playlist creation steps
-- Error details
-
-### Getting Help
-
-If you encounter issues:
-1. Check the debug log file for detailed error information
-2. Verify your Plex server is accessible
-3. Ensure your token has the necessary permissions
-4. Try searching with simpler keywords first
-
-## Examples
-
-### Create a Christmas Movie Playlist
-```
-Media type: movies
-Keywords: christmas, "New Years", holiday, santa
-Playlist name: Holiday Movies
-```
-
-### Create a Sci-Fi TV Playlist
-```
-Media type: tv
-Keywords: "Star Trek", "Star Wars", space, alien, "science fiction"
-Playlist name: Sci-Fi Shows
-```
-
-### Create a Comedy Collection
-```
-Media type: movies
-Keywords: comedy, funny, "romantic comedy", laugh
-Playlist name: Comedy Collection
-```
-
-## Requirements
-
-- Python 3.7+
-- PlexAPI library
-- Active Plex Media Server
-- Valid Plex authentication token
-- Network access to Plex server
+- **Could not connect**: check the URL (include `http://` and port `32400`) and token, then run with `--setup`
+- **A show floods the playlist**: its description matched, so every episode was added. Add the show's name to `exclude`; its individual episodes are excluded too
+- **One wrong episode**: exclude a phrase from its title (e.g. `career day`) rather than the show's name, so the show's other matching episodes stay
+- **Details**: `plex_playlist_debug.log` (rewritten each run) lists every match and which keyword caused it
 
 ## License
 

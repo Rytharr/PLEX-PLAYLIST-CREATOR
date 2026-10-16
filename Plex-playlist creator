@@ -1,279 +1,421 @@
 #!/usr/bin/env python3
+"""Plex Playlist Creator - build Plex playlists from keyword searches.
 
-from plexapi.server import PlexServer
-from plexapi.exceptions import PlexApiException
-import sys
+Run with no arguments for an interactive menu, or see --help for
+one-line commands like:  plex-playlist --preset halloween
+"""
+
+import argparse
+import json
 import logging
+import os
+import re
+import sys
+from pathlib import Path
 
-# Configure logging
+from plexapi.exceptions import NotFound, PlexApiException
+from plexapi.server import PlexServer
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+PRESETS_FILE = SCRIPT_DIR / 'presets.json'
+LOG_FILE = SCRIPT_DIR / 'plex_playlist_debug.log'
+CONFIG_FILE = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'plex-playlist-creator' / 'config.json'
+
+MEDIA_TYPES = ('movies', 'tv', 'both')
+CHUNK_SIZE = 200  # rating keys per request, keeps request URLs a sane length
+
+# Detailed log goes to the file (overwritten each run); the console just gets print() output
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('plex_playlist_debug.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=[logging.FileHandler(LOG_FILE, mode='w')]
 )
+logging.getLogger('urllib3').setLevel(logging.WARNING)
 
-def connect_to_plex():
-    """Connect to Plex server"""
-    logging.info("Starting Plex server connection...")
+
+# ---------------------------------------------------------------- config / presets
+
+def load_json(path, default):
     try:
-        # You'll need to update these with your Plex server details
-        PLEX_URL = input("Enter your Plex server URL (e.g., http://localhost:32400): ").strip()
-        PLEX_TOKEN = input("Enter your Plex token: ").strip()
-        
-        logging.debug(f"Attempting to connect to Plex server at: {PLEX_URL}")
-        logging.debug(f"Using token: {PLEX_TOKEN[:10]}..." if PLEX_TOKEN else "No token provided")
-        
-        plex = PlexServer(PLEX_URL, PLEX_TOKEN)
-        logging.info(f"Successfully connected to Plex server: {plex.friendlyName}")
-        print(f"Connected to Plex server: {plex.friendlyName}")
-        return plex
-    except PlexApiException as e:
-        logging.error(f"Failed to connect to Plex server: {e}")
-        print(f"Error connecting to Plex: {e}")
-        sys.exit(1)
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return default
 
-def search_media(plex, media_type, keywords):
-    """Search for media containing keywords in title or summary"""
-    logging.info(f"Starting media search for type: {media_type}, keywords: {keywords}")
-    results = []
-    found_titles = set()  # Track found titles to avoid duplicates
-    
-    # Get appropriate library section
-    if media_type.lower() == 'movies':
-        sections = [s for s in plex.library.sections() if s.type == 'movie']
-        logging.debug(f"Looking for movie libraries...")
-    elif media_type.lower() == 'tv':
-        sections = [s for s in plex.library.sections() if s.type == 'show']
-        logging.debug(f"Looking for TV show libraries...")
-    else:
-        logging.error(f"Invalid media type provided: {media_type}")
-        print("Invalid media type. Use 'movies' or 'tv'")
-        return results
-    
-    logging.debug(f"Found {len(sections)} matching library sections")
-    
-    if not sections:
-        logging.warning(f"No {media_type} libraries found on Plex server")
-        print(f"No {media_type} libraries found")
-        return results
-    
-    print(f"Searching in {len(sections)} {media_type} library/libraries...")
-    
-    for section in sections:
-        logging.info(f"Searching in library: {section.title}")
-        print(f"Searching in library: {section.title}")
-        
+
+def save_config(config):
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(config, indent=2))
+    CONFIG_FILE.chmod(0o600)  # contains the Plex token
+
+
+def load_presets():
+    return load_json(PRESETS_FILE, {})
+
+
+def save_presets(presets):
+    PRESETS_FILE.write_text(json.dumps(presets, indent=2) + '\n')
+
+
+def connect_to_plex(force_setup=False):
+    """Connect using saved settings, asking for them (and saving them) the first time"""
+    config = {} if force_setup else load_json(CONFIG_FILE, {})
+    url = os.environ.get('PLEX_URL') or config.get('url')
+    token = os.environ.get('PLEX_TOKEN') or config.get('token')
+    first_time = not (url and token)
+
+    while True:
+        if first_time:
+            print('Plex server setup (saved to', CONFIG_FILE, ')')
+            url = ask('Plex server URL', url or 'http://localhost:32400')
+            token = ask('Plex token (see README for how to find it)', token)
         try:
-            all_media = section.all()
-            logging.debug(f"Retrieved {len(all_media)} items from library: {section.title}")
-            print(f"Total items in library: {len(all_media)}")
+            logging.info(f'Connecting to Plex at {url}')
+            plex = PlexServer(url, token)
         except Exception as e:
-            logging.error(f"Failed to retrieve items from library {section.title}: {e}")
-            continue
-        
-        matches_in_section = 0
-        for item in all_media:
-            if media_type.lower() == 'movies':
-                # For movies, check title and summary
-                title = item.title.lower()
-                summary = getattr(item, 'summary', '').lower() if hasattr(item, 'summary') else ''
-                
-                # Check if any keyword matches movie title or summary
-                for keyword in keywords:
-                    if (keyword.lower() in title or keyword.lower() in summary) and item.title not in found_titles:
-                        results.append(item)
-                        found_titles.add(item.title)
-                        matches_in_section += 1
-                        logging.debug(f"Match found: '{item.title}' (keyword: {keyword})")
-                        print(f"Found: {item.title}")
-                        break
-            
-            elif media_type.lower() == 'tv':
-                # For TV shows, first check series-level metadata
-                title = item.title.lower()
-                summary = getattr(item, 'summary', '').lower() if hasattr(item, 'summary') else ''
-                
-                series_match = False
-                # Check if any keyword matches series title or summary
-                for keyword in keywords:
-                    if (keyword.lower() in title or keyword.lower() in summary):
-                        if item.title not in found_titles:
-                            results.append(item)
-                            found_titles.add(item.title)
-                            matches_in_section += 1
-                            logging.debug(f"Series match found: '{item.title}' (keyword: {keyword})")
-                            print(f"Found series: {item.title}")
-                            series_match = True
-                        break
-                
-                # Also search individual episodes
-                logging.debug(f"Searching episodes for series: {item.title}")
-                try:
-                    for episode in item.episodes():
-                        episode_title = episode.title.lower()
-                        episode_summary = getattr(episode, 'summary', '').lower() if hasattr(episode, 'summary') else ''
-                        
-                        # Create unique identifier for episode
-                        episode_id = f"{item.title} - S{episode.seasonNumber:02d}E{episode.episodeNumber:02d} - {episode.title}"
-                        
-                        for keyword in keywords:
-                            if (keyword.lower() in episode_title or keyword.lower() in episode_summary) and episode_id not in found_titles:
-                                results.append(episode)
-                                found_titles.add(episode_id)
-                                matches_in_section += 1
-                                logging.debug(f"Episode match found: '{episode.title}' from series '{item.title}' (keyword: {keyword})")
-                                print(f"Found episode: {item.title} - {episode.title}")
-                                break
-                except Exception as e:
-                    logging.warning(f"Could not search episodes for series '{item.title}': {e}")
-        
-        logging.info(f"Found {matches_in_section} matches in library: {section.title}")
-    
-    logging.info(f"Search completed. Total matches found: {len(results)}")
-    return results
+            logging.error(f'Failed to connect to Plex: {e}')
+            print(f'Could not connect to Plex at {url}: {e}')
+            if first_time and ask_yes_no('Try again?', default=True):
+                continue
+            if not first_time:
+                print('Run with --setup to change the saved server URL or token.')
+            sys.exit(1)
+        if first_time:
+            save_config({'url': url, 'token': token})
+        print(f'Connected to Plex server: {plex.friendlyName}')
+        logging.info(f'Connected to Plex server: {plex.friendlyName}')
+        return plex
 
-def create_playlist(plex, playlist_name, media_items):
-    """Create a playlist with the found media items"""
-    logging.info(f"Starting playlist creation: '{playlist_name}' with {len(media_items)} items")
-    
-    if not media_items:
-        logging.warning("No media items provided for playlist creation")
-        print("No media items to add to playlist")
-        return
-    
-    try:
-        # Check if playlist already exists
-        logging.debug(f"Checking for existing playlists...")
-        existing_playlists = plex.playlists()
-        logging.debug(f"Found {len(existing_playlists)} existing playlists")
-        
-        for playlist in existing_playlists:
-            if playlist.title == playlist_name:
-                logging.info(f"Playlist '{playlist_name}' already exists")
-                overwrite = input(f"Playlist '{playlist_name}' already exists. Overwrite? (y/n): ")
-                if overwrite.lower() == 'y':
-                    logging.info(f"Deleting existing playlist: {playlist_name}")
-                    playlist.delete()
-                    break
-                else:
-                    logging.info("User cancelled playlist creation")
-                    print("Playlist creation cancelled")
-                    return
-        
-        # Create new playlist
-        logging.debug(f"Creating new playlist with {len(media_items)} items")
-        playlist = plex.createPlaylist(playlist_name, items=media_items)
-        logging.info(f"Successfully created playlist: {playlist_name}")
-        print(f"Playlist '{playlist_name}' created successfully with {len(media_items)} items")
-        
-    except PlexApiException as e:
-        logging.error(f"Failed to create playlist: {e}")
-        print(f"Error creating playlist: {e}")
+
+# ---------------------------------------------------------------- input helpers
+
+def ask(prompt, default=None):
+    suffix = f' [{default}]' if default else ''
+    answer = input(f'{prompt}{suffix}: ').strip()
+    return answer or default or ''
+
+
+def ask_yes_no(prompt, default=False):
+    answer = input(f'{prompt} ({"Y/n" if default else "y/N"}): ').strip().lower()
+    return default if not answer else answer.startswith('y')
+
+
+def ask_media_type(default='both'):
+    while True:
+        media_type = ask("Search 'movies', 'tv' or 'both'", default).lower()
+        if media_type in MEDIA_TYPES:
+            return media_type
+        print('Please enter movies, tv or both.')
+
 
 def parse_keywords(keywords_input):
-    """Parse keywords input, handling quoted phrases"""
+    """Parse comma-separated keywords, keeping "quoted phrases" together"""
     keywords = []
-    current_phrase = ""
+    current_phrase = ''
     in_quotes = False
-    
-    i = 0
-    while i < len(keywords_input):
-        char = keywords_input[i]
-        
-        if char == '"' and not in_quotes:
-            # Start of quoted phrase
-            in_quotes = True
-        elif char == '"' and in_quotes:
-            # End of quoted phrase
-            if current_phrase.strip():
-                keywords.append(current_phrase.strip())
-            current_phrase = ""
-            in_quotes = False
+
+    for char in keywords_input:
+        if char == '"':
+            in_quotes = not in_quotes
         elif char == ',' and not in_quotes:
-            # Comma outside quotes - end current keyword
             if current_phrase.strip():
                 keywords.append(current_phrase.strip())
-            current_phrase = ""
+            current_phrase = ''
         else:
-            # Regular character
             current_phrase += char
-        
-        i += 1
-    
-    # Add final keyword/phrase if exists
+
     if current_phrase.strip():
         keywords.append(current_phrase.strip())
-    
+
     return keywords
 
-def main():
-    logging.info("=" * 50)
-    logging.info("Starting Plex Playlist Creator application")
-    logging.info("=" * 50)
-    
-    print("Plex Playlist Creator")
-    print("=" * 30)
-    print("Examples of keyword formats:")
-    print("  Single words: action, comedy, thriller")
-    print("  Phrases: \"New Years\", \"Star Wars\", \"Game of Thrones\"")
-    print("  Mixed: action, \"New Years\", comedy, \"Star Trek\"")
-    print()
-    
-    # Connect to Plex
-    plex = connect_to_plex()
-    
-    # Get user input
-    media_type = input("Create playlist for 'movies' or 'tv' shows? ").strip()
-    logging.info(f"User selected media type: {media_type}")
-    
-    keywords_input = input("Enter keywords to search for (comma-separated, use quotes for phrases like \"New Years\"): ").strip()
-    
-    keywords = parse_keywords(keywords_input)
-    
-    logging.info(f"User provided keywords: {keywords}")
-    print(f"Parsed keywords: {keywords}")  # Show user what was parsed
-    
-    if not keywords:
-        logging.error("No keywords provided by user")
-        print("No keywords provided")
-        sys.exit(1)
-    
-    playlist_name = input("Enter playlist name: ").strip()
-    if not playlist_name:
-        playlist_name = f"Keyword Search: {', '.join(keywords)}"
-        logging.info(f"Generated default playlist name: {playlist_name}")
-    else:
-        logging.info(f"User provided playlist name: {playlist_name}")
-    
-    # Search for media
-    print(f"\nSearching for {media_type} with keywords: {', '.join(keywords)}")
-    media_items = search_media(plex, media_type, keywords)
-    
-    if media_items:
-        logging.info(f"Search successful - found {len(media_items)} matching items")
-        print(f"\nFound {len(media_items)} matching items")
-        
-        # Log the found items for debugging
-        logging.debug("Found items:")
-        for item in media_items:
-            logging.debug(f"  - {item.title}")
-        
-        create_confirmation = input("Create playlist with these items? (y/n): ")
-        logging.info(f"User confirmation for playlist creation: {create_confirmation}")
-        
-        if create_confirmation.lower() == 'y':
-            create_playlist(plex, playlist_name, media_items)
-        else:
-            logging.info("User cancelled playlist creation")
-            print("Playlist creation cancelled")
-    else:
-        logging.warning("No matching media found")
-        print("No matching media found")
-    
-    logging.info("Application completed")
 
-if __name__ == "__main__":
+def format_keywords(keywords):
+    return ', '.join(f'"{k}"' if ' ' in k else k for k in keywords)
+
+
+# ---------------------------------------------------------------- searching
+
+APOSTROPHES = re.compile(r"['’]")
+
+
+def keyword_pattern(keyword):
+    """Whole-word match with an optional plural 's', so 'elf' finds "Elf" but not
+    "herself". A * at either end matches any ending or beginning:
+    'christmas*' finds "Christmastime", '*christmas' finds "Ludachristmas"."""
+    keyword = APOSTROPHES.sub('', keyword)
+    words = r'\s+'.join(map(re.escape, keyword.strip('*').split()))
+    start = r'\w*' if keyword.startswith('*') else r'(?<!\w)'
+    end = r'\w*' if keyword.endswith('*') else r's?(?!\w)'
+    return start + words + end
+
+
+def build_matcher(keywords):
+    if not keywords:
+        return None
+    alternatives = '|'.join(keyword_pattern(k) for k in keywords)
+    return re.compile(f'({alternatives})', re.IGNORECASE)
+
+
+def item_text(*parts):
+    # Apostrophes are dropped so "New Year's" matches the keyword new years
+    return APOSTROPHES.sub('', '\n'.join(p for p in parts if p))
+
+
+def check(include, exclude, text, exclude_text=None):
+    """Return the keyword that matched, or None if no match / excluded"""
+    match = include.search(text)
+    if not match:
+        return None
+    if exclude and exclude.search(exclude_text or text):
+        return None
+    return match.group(1)
+
+
+def search_media(plex, media_type, keywords, exclude_keywords=()):
+    """Find movies, whole shows and individual episodes whose title or summary
+    contains a keyword. Returns (movies, shows, episodes)."""
+    include = build_matcher(keywords)
+    exclude = build_matcher(exclude_keywords)
+    movies, shows, episodes = [], [], []
+    logging.info(f'Searching {media_type} for {keywords}, excluding {list(exclude_keywords)}')
+
+    for section in plex.library.sections():
+        if section.type == 'movie' and media_type in ('movies', 'both'):
+            print(f'Searching movie library: {section.title}')
+            for movie in section.all():
+                keyword = check(include, exclude, item_text(movie.title, movie.summary))
+                if keyword:
+                    logging.debug(f'Movie match: {movie.title} ({keyword})')
+                    movies.append(movie)
+
+        elif section.type == 'show' and media_type in ('tv', 'both'):
+            print(f'Searching TV library: {section.title}')
+            matched_shows = set()
+            for show in section.all():
+                keyword = check(include, exclude, item_text(show.title, show.summary))
+                if keyword:
+                    logging.debug(f'Show match: {show.title} ({keyword})')
+                    shows.append(show)
+                    matched_shows.add(show.ratingKey)
+
+            # One request for every episode in the library, instead of one per show
+            for episode in section.searchEpisodes():
+                if episode.grandparentRatingKey in matched_shows:
+                    continue  # whole show is already going in
+                text = item_text(episode.title, episode.summary)
+                keyword = check(include, exclude, text, item_text(episode.grandparentTitle, text))
+                if keyword:
+                    logging.debug(f'Episode match: {episode_label(episode)} ({keyword})')
+                    episodes.append(episode)
+
+    movies.sort(key=lambda m: (m.titleSort or m.title).lower())
+    shows.sort(key=lambda s: (s.titleSort or s.title).lower())
+    episodes.sort(key=lambda e: (e.grandparentTitle.lower(), e.parentIndex or 0, e.index or 0))
+    logging.info(f'Found {len(movies)} movies, {len(shows)} shows, {len(episodes)} episodes')
+    return movies, shows, episodes
+
+
+def episode_label(episode):
+    return f'{episode.grandparentTitle} - S{episode.parentIndex or 0:02d}E{episode.index or 0:02d} - {episode.title}'
+
+
+def show_results(movies, shows, episodes):
+    if movies:
+        print(f'\nMovies ({len(movies)}):')
+        for movie in movies:
+            print(f'  {movie.title} ({movie.year})' if movie.year else f'  {movie.title}')
+    if shows:
+        print(f'\nWhole shows ({len(shows)}) - every episode is added:')
+        for show in shows:
+            print(f'  {show.title}')
+    if episodes:
+        print(f'\nEpisodes ({len(episodes)}):')
+        for episode in episodes:
+            print(f'  {episode_label(episode)}')
+
+
+# ---------------------------------------------------------------- playlists
+
+def chunks(items):
+    for i in range(0, len(items), CHUNK_SIZE):
+        yield items[i:i + CHUNK_SIZE]
+
+
+def find_playlist(plex, name):
+    try:
+        return plex.playlist(name)
+    except NotFound:
+        return None
+
+
+def build_playlist(plex, name, movies, shows, episodes, assume_yes=False, add_only=False, dry_run=False):
+    """Create the playlist, or bring an existing one up to date with the search results.
+    Existing playlists are updated in place, so their poster and order are kept."""
+    wanted = list(movies)
+    for show in shows:
+        wanted.extend(show.episodes())
+    wanted.extend(episodes)
+    wanted_keys = {item.ratingKey for item in wanted}
+
+    playlist = find_playlist(plex, name)
+    if playlist:
+        current = playlist.items()
+        current_keys = {item.ratingKey for item in current}
+        to_add = [item for item in wanted if item.ratingKey not in current_keys]
+        to_remove = [] if add_only else [item for item in current if item.ratingKey not in wanted_keys]
+        print(f"\nPlaylist '{name}' already exists ({len(current)} items): "
+              f'{len(to_add)} to add, {len(to_remove)} to remove.')
+        for item in to_remove:
+            print(f'  - {episode_label(item) if item.type == "episode" else item.title}')
+        if not to_add and not to_remove:
+            print('Nothing to change.')
+            return
+    else:
+        if not wanted:
+            print('\nNothing found, so no playlist was created.')
+            return
+        print(f"\nNew playlist '{name}' with {len(wanted)} items.")
+
+    if dry_run:
+        print('Dry run - no changes made.')
+        return
+    if not assume_yes and not ask_yes_no('Go ahead?', default=True):
+        print('Cancelled.')
+        return
+
+    try:
+        if playlist:
+            for batch in chunks(to_add):
+                playlist.addItems(batch)
+            if to_remove:
+                playlist.removeItems(to_remove)
+            print(f"Updated '{name}': +{len(to_add)} / -{len(to_remove)}")
+        else:
+            batches = list(chunks(wanted))
+            playlist = plex.createPlaylist(name, items=batches[0])
+            for batch in batches[1:]:
+                playlist.addItems(batch)
+            print(f"Created '{name}' with {len(wanted)} items")
+        logging.info(f'Playlist {name} saved')
+    except PlexApiException as e:
+        logging.error(f'Failed to save playlist {name}: {e}')
+        print(f'Error saving playlist: {e}')
+
+
+def run_search(plex, name, media_type, keywords, exclude=(), **playlist_options):
+    print(f"\n=== {name} ===")
+    print(f'Searching {media_type} for: {format_keywords(keywords)}'
+          + (f'  (excluding: {format_keywords(exclude)})' if exclude else ''))
+    movies, shows, episodes = search_media(plex, media_type, keywords, exclude)
+    show_results(movies, shows, episodes)
+    build_playlist(plex, name, movies, shows, episodes, **playlist_options)
+
+
+def run_preset(plex, preset, **playlist_options):
+    run_search(plex, preset['name'], preset.get('type', 'both'), preset['keywords'],
+               preset.get('exclude', []), **playlist_options)
+
+
+# ---------------------------------------------------------------- interactive menu
+
+def custom_search(plex, presets, **playlist_options):
+    print('Keywords are comma-separated; use quotes for phrases, e.g.  zombie, "living dead"')
+    keywords = parse_keywords(ask('Keywords'))
+    if not keywords:
+        print('No keywords given.')
+        return
+    exclude = parse_keywords(ask('Exclude keywords (optional)'))
+    media_type = ask_media_type()
+    name = ask('Playlist name', keywords[0].title())
+
+    run_search(plex, name, media_type, keywords, exclude, **playlist_options)
+
+    if ask_yes_no('\nSave this search as a preset for next time?'):
+        key = re.sub(r'\W+', '-', name.lower()).strip('-')
+        presets[key] = {'name': name, 'type': media_type, 'keywords': keywords, 'exclude': exclude}
+        save_presets(presets)
+        print(f"Saved. Next time run:  plex-playlist --preset {key}")
+
+
+def interactive(plex, **playlist_options):
+    while True:
+        presets = load_presets()
+        keys = list(presets)
+        print('\nPlex Playlist Creator')
+        for i, key in enumerate(keys, 1):
+            preset = presets[key]
+            print(f"  {i}) {preset['name']:<20} {preset.get('type', 'both'):<6} {format_keywords(preset['keywords'])}")
+        if keys:
+            print('  a) Update all presets')
+        print('  c) Custom search')
+        print('  q) Quit')
+
+        choice = input('Choose: ').strip().lower()
+        if choice in ('q', ''):
+            return
+        if choice == 'c':
+            custom_search(plex, presets, **playlist_options)
+        elif choice == 'a' and keys:
+            for key in keys:
+                run_preset(plex, presets[key], **playlist_options)
+        elif choice.isdigit() and 1 <= int(choice) <= len(keys):
+            key = keys[int(choice) - 1]
+            run_preset(plex, presets[key], **playlist_options)
+        else:
+            print('Not a valid choice.')
+
+
+# ---------------------------------------------------------------- main
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Create or update Plex playlists from keyword searches.',
+        epilog='Run with no arguments for the interactive menu.')
+    parser.add_argument('-p', '--preset', action='append', metavar='NAME',
+                        help='run a saved preset from presets.json (repeatable)')
+    parser.add_argument('--all-presets', action='store_true', help='run every saved preset')
+    parser.add_argument('--list-presets', action='store_true', help='show saved presets and exit')
+    parser.add_argument('-k', '--keywords', help='one-off search, e.g. \'zombie, "living dead"\'')
+    parser.add_argument('-x', '--exclude', default='', help='keywords that disqualify a match')
+    parser.add_argument('-t', '--type', choices=MEDIA_TYPES, default='both', help='media to search (default: both)')
+    parser.add_argument('-n', '--name', help='playlist name for --keywords')
+    parser.add_argument('-y', '--yes', action='store_true', help="don't ask for confirmation")
+    parser.add_argument('--add-only', action='store_true',
+                        help="when updating, don't remove items that no longer match")
+    parser.add_argument('--dry-run', action='store_true', help='show what would change without changing anything')
+    parser.add_argument('--setup', action='store_true', help='re-enter the Plex server URL and token')
+    args = parser.parse_args()
+
+    presets = load_presets()
+    if args.list_presets:
+        for key, preset in presets.items():
+            print(f"{key:<15} -> '{preset['name']}' ({preset.get('type', 'both')}): {format_keywords(preset['keywords'])}"
+                  + (f"  excluding {format_keywords(preset['exclude'])}" if preset.get('exclude') else ''))
+        return
+
+    unknown = [p for p in args.preset or [] if p not in presets]
+    if unknown:
+        parser.error(f"unknown preset(s): {', '.join(unknown)}. Available: {', '.join(presets) or 'none'}")
+
+    playlist_options = {'assume_yes': args.yes, 'add_only': args.add_only, 'dry_run': args.dry_run}
+
+    try:
+        plex = connect_to_plex(force_setup=args.setup)
+
+        if args.all_presets or args.preset:
+            for key in presets if args.all_presets else args.preset:
+                run_preset(plex, presets[key], **playlist_options)
+        elif args.keywords:
+            keywords = parse_keywords(args.keywords)
+            if not keywords:
+                parser.error('--keywords was empty')
+            run_search(plex, args.name or keywords[0].title(), args.type, keywords,
+                       parse_keywords(args.exclude), **playlist_options)
+        else:
+            interactive(plex, **playlist_options)
+    except (KeyboardInterrupt, EOFError):
+        print('\nBye.')
+
+
+if __name__ == '__main__':
     main()

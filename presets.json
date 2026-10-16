@@ -1,0 +1,42 @@
+{
+  "halloween": {
+    "name": "Halloween Episodes",
+    "type": "tv",
+    "keywords": [
+      "*halloween*"
+    ],
+    "exclude": []
+  },
+  "halloween-movies": {
+    "name": "Halloween Movies",
+    "type": "movies",
+    "keywords": [
+      "*halloween*"
+    ],
+    "exclude": []
+  },
+  "christmas": {
+    "name": "Christmas Episodes",
+    "type": "tv",
+    "keywords": [
+      "*christmas*",
+      "*thanksgiving*",
+      "new years",
+      "happy new year"
+    ],
+    "exclude": [
+      "guilty crown"
+    ]
+  },
+  "christmas-movies": {
+    "name": "Christmas Movies",
+    "type": "movies",
+    "keywords": [
+      "*christmas*",
+      "*thanksgiving*",
+      "new years",
+      "happy new year"
+    ],
+    "exclude": []
+  }
+}
